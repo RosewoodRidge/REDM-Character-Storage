@@ -4,16 +4,16 @@ Config = {}
 Config.Debug = false
 
 -- Price to create a storage
-Config.StorageCreationPrice = 500
+Config.StorageCreationPrice = 5
 
 -- Price to increase storage capacity
-Config.StorageUpgradePrice = 100
+Config.StorageUpgradePrice = 1.5
 
 -- Price multiplier for each tier of upgrades (0.15 = 15% increase per tier)
-Config.StorageUpgradePriceMultiplier = 0.10
+Config.StorageUpgradePriceMultiplier = 0.1
 
 -- Amount to increase storage by
-Config.StorageUpgradeSlots = 20
+Config.StorageUpgradeSlots = 25
 
 -- Maximum number of storages a player can own
 Config.MaxStorages = 2
@@ -82,11 +82,13 @@ Config.DefaultStorages = {
         id = "doctor_main", -- Unique ID for this preset storage configuration
         name = "Doctor Storage",
         locations = {
-            vector3(-764.84, -1272.38, 44.09),   -- Blackwater Doctor Station
-            vector3(2722.93, -1233.52, 50.37),    -- St. Denis Doctor Station
+            vector3(-764.84, -1272.38, 44.09),  -- Blackwater Doctor Station
+            vector3(2722.93, -1233.52, 50.37),  -- St. Denis Doctor Station
             vector3(1368.54, -1307.05, 77.97),  -- Rhodes Doctor Station
             vector3(-1806.8, -428.47, 158.83),  -- Strawberry Doctor Station
-            vector3(-288.86, 803.66, 119.39)   -- Valentine Doctor Station
+            vector3(-288.86, 803.66, 119.39),   -- Valentine Doctor Station
+            vector3(2923.01, 1356.76, 44.83),   -- Annesburg Doctor Station
+            vector3(-3735.52, -2632.79, -12.79) -- Armadillo Doctor Station
         },
         linked = true, -- True: all locations share one inventory. False: each location is a separate instance.
         capacity = 5000,
@@ -206,6 +208,7 @@ Config.Translations = {
         ["job_grades_desc"] = "Enter grades (e.g., 0,1,2) or 'all'",
         ["remove_job_access_text"] = "Remove access rule for job %s?",
         ["enter_job_and_grades_desc"] = "Example: police 0,1,2  OR  police all",
+        
         -- Inputs
         ["confirm"] = "Confirm",
         ["enter_new_name"] = "Enter new name",
@@ -233,6 +236,27 @@ Config.Translations = {
         ["admin_mode_disabled"] = "ADMIN MODE: Showing only accessible storage blips",
         ["admin_command_usage"] = "Usage: /%s [show/hide]",
         ["admin_invalid_option"] = "Invalid option. Use 'show' or 'hide'",
+        
+        -- Money/Ledger related
+        ["view_ledger"] = "View Ledger",
+        ["view_ledger_desc"] = "View deposit and withdrawal history",
+        ["deposit_money"] = "Deposit Money",
+        ["deposit_money_desc"] = "Deposit money into storage",
+        ["withdraw_money"] = "Withdraw Money",
+        ["withdraw_money_desc"] = "Withdraw money from storage",
+        ["storage_balance"] = "Balance: $%s",
+        ["enter_amount"] = "Enter Amount",
+        ["deposit_success"] = "Deposited $%s into storage",
+        ["withdraw_success"] = "Withdrew $%s from storage",
+        ["insufficient_funds"] = "Insufficient funds",
+        ["insufficient_storage_funds"] = "Storage has insufficient funds",
+        ["invalid_amount"] = "Invalid amount",
+        ["ledger_title"] = "Ledger History",
+        ["ledger_entry"] = "%s | $%s | %s",
+        ["ledger_deposit"] = "Deposit",
+        ["ledger_withdrawal"] = "Withdrawal",
+        ["no_transactions"] = "No transactions yet",
+        ["ledger_by"] = "by %s",
     },
     
     ["spanish"] = {
@@ -347,6 +371,27 @@ Config.Translations = {
         ["admin_mode_enabled"] = "MODO ADMIN: Mostrando TODOS los blips de almacén",
         ["admin_mode_disabled"] = "MODO ADMIN: Mostrando solo blips de almacén accesibles",
         ["admin_command_usage"] = "Uso: /%s [show/hide]",
-        ["admin_invalid_option"] = "Opción inválida. Utiliza 'show' o 'hide'"
+        ["admin_invalid_option"] = "Opción inválida. Utiliza 'show' o 'hide'",
+        
+        -- Money/Ledger related
+        ["view_ledger"] = "Ver Registro",
+        ["view_ledger_desc"] = "Ver historial de depósitos y retiros",
+        ["deposit_money"] = "Depositar Dinero",
+        ["deposit_money_desc"] = "Depositar dinero en el almacén",
+        ["withdraw_money"] = "Retirar Dinero",
+        ["withdraw_money_desc"] = "Retirar dinero del almacén",
+        ["storage_balance"] = "Balance: $%s",
+        ["enter_amount"] = "Introducir Cantidad",
+        ["deposit_success"] = "Depositado $%s en el almacén",
+        ["withdraw_success"] = "Retirado $%s del almacén",
+        ["insufficient_funds"] = "Fondos insuficientes",
+        ["insufficient_storage_funds"] = "El almacén tiene fondos insuficientes",
+        ["invalid_amount"] = "Cantidad inválida",
+        ["ledger_title"] = "Historial de Registro",
+        ["ledger_entry"] = "%s | $%s | %s",
+        ["ledger_deposit"] = "Depósito",
+        ["ledger_withdrawal"] = "Retiro",
+        ["no_transactions"] = "Sin transacciones aún",
+        ["ledger_by"] = "por %s",
     }
 }

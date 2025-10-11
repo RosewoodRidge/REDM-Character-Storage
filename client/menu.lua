@@ -70,15 +70,17 @@ end
 function OpenOwnerStorageMenu(storageId)
     MenuData.CloseAll()
     
-    -- Get the storage name for the title
+    -- Get the storage name and balance
     local storageName = GetTranslation("storage_title", storageId)
     local currentCapacity = Config.DefaultCapacity
+    local storageBalance = 0
     
     -- Find storage details
     for _, storage in pairs(playerStorages) do
         if storage.id == storageId then
             storageName = storage.storage_name or GetTranslation("storage_title", storageId)
             currentCapacity = tonumber(storage.capacity) or Config.DefaultCapacity
+            storageBalance = tonumber(storage.money_balance) or 0
             break
         end
     end
@@ -92,6 +94,21 @@ function OpenOwnerStorageMenu(storageId)
             label = GetTranslation("open_storage"),
             value = "open",
             desc = GetTranslation("open_storage_desc")
+        },
+        {
+            label = GetTranslation("deposit_money"),
+            value = "deposit",
+            desc = GetTranslation("deposit_money_desc")
+        },
+        {
+            label = GetTranslation("withdraw_money"),
+            value = "withdraw",
+            desc = GetTranslation("withdraw_money_desc")
+        },
+        {
+            label = GetTranslation("view_ledger"),
+            value = "ledger",
+            desc = GetTranslation("view_ledger_desc")
         },
         {
             label = GetTranslation("rename_storage"),
@@ -118,7 +135,7 @@ function OpenOwnerStorageMenu(storageId)
     MenuData.Open("default", GetCurrentResourceName(), "storage_owner_menu",
     {
         title = storageName,
-        subtext = GetTranslation("storage_management"),
+        subtext = GetTranslation("storage_balance", string.format("%.2f", storageBalance)),
         align = "top-right",
         elements = elements
     }, function(data, menu)
@@ -126,6 +143,15 @@ function OpenOwnerStorageMenu(storageId)
             DebugMsg("Open option selected for storage ID: " .. storageId)
             TriggerEvent('character_storage:openAttempt', storageId)
             menu.close()
+        elseif data.current.value == "deposit" then
+            menu.close()
+            OpenDepositMenu(storageId)
+        elseif data.current.value == "withdraw" then
+            menu.close()
+            OpenWithdrawMenu(storageId)
+        elseif data.current.value == "ledger" then
+            menu.close()
+            OpenLedgerMenu(storageId)
         elseif data.current.value == "rename" then
             menu.close()
             OpenRenameMenu(storageId)
@@ -970,3 +996,176 @@ end)
 exports('OpenOwnerStorageMenu', OpenOwnerStorageMenu)
 exports('OpenCreateStorageMenu', OpenCreateStorageMenu)
 exports('UpdateStorages', UpdateStorages)
+
+-- Deposit money menu
+function OpenDepositMenu(storageId)
+    MenuData.CloseAll()
+    
+    local myInput = {
+        type = "enableinput",
+        inputType = "input",
+        button = GetTranslation("confirm"),
+        placeholder = GetTranslation("enter_amount"),
+        style = "block",
+        attributes = {
+            inputHeader = GetTranslation("deposit_money"),
+            type = "number",
+            pattern = "[0-9]+",
+            title = "Enter amount to deposit",
+            style = "border-radius: 10px; background-color: ; border:none;"
+        }
+    }
+
+    TriggerEvent("vorpinputs:advancedInput", json.encode(myInput), function(result)
+        local amount = tonumber(result)
+        if amount and amount > 0 then
+            TriggerServerEvent('character_storage:depositMoney', storageId, amount)
+            Wait(500)
+            -- Request updated balance
+            TriggerServerEvent('character_storage:getStorageBalance', storageId)
+        else
+            VORPcore.NotifyRightTip(GetTranslation("invalid_amount"), 3000)
+        end
+        OpenOwnerStorageMenu(storageId)
+    end)
+end
+
+-- Withdraw money menu
+function OpenWithdrawMenu(storageId)
+    MenuData.CloseAll()
+    
+    local myInput = {
+        type = "enableinput",
+        inputType = "input",
+        button = GetTranslation("confirm"),
+        placeholder = GetTranslation("enter_amount"),
+        style = "block",
+        attributes = {
+            inputHeader = GetTranslation("withdraw_money"),
+            type = "number",
+            pattern = "[0-9]+",
+            title = "Enter amount to withdraw",
+            style = "border-radius: 10px; background-color: ; border:none;"
+        }
+    }
+
+    TriggerEvent("vorpinputs:advancedInput", json.encode(myInput), function(result)
+        local amount = tonumber(result)
+        if amount and amount > 0 then
+            TriggerServerEvent('character_storage:withdrawMoney', storageId, amount)
+            Wait(500)
+            -- Request updated balance
+            TriggerServerEvent('character_storage:getStorageBalance', storageId)
+        else
+            VORPcore.NotifyRightTip(GetTranslation("invalid_amount"), 3000)
+        end
+        OpenOwnerStorageMenu(storageId)
+    end)
+end
+
+-- View ledger history menu
+function OpenLedgerMenu(storageId)
+    MenuData.CloseAll()
+    
+    -- Request ledger data from server
+    TriggerServerEvent('character_storage:getStorageBalance', storageId)
+    
+    -- Wait a moment for server response
+    Wait(200)
+    
+    -- Find storage
+    local storage = nil
+    for _, s in pairs(playerStorages) do
+        if s.id == storageId then
+            storage = s
+            break
+        end
+    end
+    
+    if not storage then return end
+    
+    local ledgerHistory = storage.ledger_history or ""
+    local elements = {}
+    
+    if ledgerHistory ~= "" then
+        -- Parse ledger: format is "Name|Amount|Type|Timestamp;Name|Amount|Type|Timestamp"
+        for entry in string.gmatch(ledgerHistory, "[^;]+") do
+            local parts = {}
+            for part in string.gmatch(entry, "[^|]+") do
+                table.insert(parts, part)
+            end
+            
+            if #parts >= 4 then
+                local fullName = parts[1] -- e.g., "John Smith"
+                local amount = string.format("%.2f", tonumber(parts[2]) or 0)
+                local transType = parts[3] == "deposit" and GetTranslation("ledger_deposit") or GetTranslation("ledger_withdrawal")
+                local timestamp = parts[4]
+                
+                -- Format the name for display (e.g., "Smith, John" or keep "John Smith")
+                local displayName = fullName
+                local firstName, lastName = string.match(fullName, "^(%S+)%s+(.+)$")
+                if firstName and lastName then
+                    displayName = lastName .. ", " .. firstName -- Display as "Last, First"
+                end
+                
+                table.insert(elements, 1, { -- Insert at beginning for newest first
+                    label = string.format("%s | $%s | %s", timestamp, amount, transType),
+                    value = "entry_" .. #elements,
+                    desc = displayName
+                })
+            end
+        end
+    end
+    
+    if #elements == 0 then
+        table.insert(elements, {
+            label = GetTranslation("no_transactions"),
+            value = "none",
+            desc = ""
+        })
+    end
+    
+    table.insert(elements, {
+        label = GetTranslation("back_menu"),
+        value = "back",
+        desc = ""
+    })
+    
+    local storageName = storage.storage_name or GetTranslation("storage_title", storageId)
+    local balance = tonumber(storage.money_balance) or 0
+    
+    MenuData.Open("default", GetCurrentResourceName(), "ledger_menu",
+    {
+        title = GetTranslation("ledger_title"),
+        subtext = storageName .. " - " .. GetTranslation("storage_balance", string.format("%.2f", balance)),
+        align = "top-right",
+        elements = elements
+    }, function(data, menu)
+        if data.current.value == "back" then
+            menu.close()
+            OpenOwnerStorageMenu(storageId)
+        end
+    end, function(data, menu)
+        menu.close()
+        OpenOwnerStorageMenu(storageId)
+    end)
+end
+
+-- Update storage balance when received from server
+RegisterNetEvent('character_storage:receiveStorageBalance')
+AddEventHandler('character_storage:receiveStorageBalance', function(storageId, balance, ledger)
+    -- Update local storage data
+    for i, storage in pairs(playerStorages) do
+        if storage.id == storageId then
+            playerStorages[i].money_balance = balance
+            playerStorages[i].ledger_history = ledger
+            break
+        end
+    end
+end)
+
+-- Update balance trigger
+RegisterNetEvent('character_storage:updateStorageBalance')
+AddEventHandler('character_storage:updateStorageBalance', function(storageId)
+    TriggerServerEvent('character_storage:getStorageBalance', storageId)
+end)

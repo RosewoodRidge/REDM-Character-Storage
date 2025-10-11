@@ -1287,3 +1287,123 @@ exports('RefreshAllPlayerStorages', function()
     SendStoragesToAllPlayers()
     return true
 end)
+
+-- Deposit money into storage
+RegisterServerEvent('character_storage:depositMoney')
+AddEventHandler('character_storage:depositMoney', function(storageId, amount)
+    local source = source
+    local Character = VORPcore.getUser(source).getUsedCharacter
+    local charId = Character.charIdentifier
+    local playerJob = Character.job
+    local playerJobGrade = Character.jobGrade
+    
+    -- Validate amount
+    amount = tonumber(amount)
+    if not amount or amount <= 0 then
+        VORPcore.NotifyRightTip(source, GetTranslation("invalid_amount"), 4000)
+        return
+    end
+    
+    -- Check if player has access
+    if not HasStorageAccess(charId, storageId, playerJob, playerJobGrade) then
+        VORPcore.NotifyRightTip(source, GetTranslation("no_permission"), 4000)
+        return
+    end
+    
+    -- Check if player has enough money
+    if Character.money < amount then
+        VORPcore.NotifyRightTip(source, GetTranslation("insufficient_funds"), 4000)
+        return
+    end
+    
+    -- Get player name
+    local playerName = Character.firstname .. " " .. Character.lastname
+    
+    -- Remove money from player
+    Character.removeCurrency(0, amount)
+    
+    -- Add to storage and ledger
+    DB.AddLedgerEntry(storageId, playerName, amount, "deposit", function(success)
+        if success then
+            VORPcore.NotifyRightTip(source, GetTranslation("deposit_success", string.format("%.2f", amount)), 4000)
+            
+            -- Update last_accessed timestamp
+            if storageCache[storageId] and not storageCache[storageId].isPreset then
+                DB.UpdateLastAccessed(storageId)
+            end
+            
+            -- Refresh storage data for player
+            TriggerClientEvent('character_storage:updateStorageBalance', source, storageId)
+        end
+    end)
+end)
+
+-- Withdraw money from storage
+RegisterServerEvent('character_storage:withdrawMoney')
+AddEventHandler('character_storage:withdrawMoney', function(storageId, amount)
+    local source = source
+    local Character = VORPcore.getUser(source).getUsedCharacter
+    local charId = Character.charIdentifier
+    local playerJob = Character.job
+    local playerJobGrade = Character.jobGrade
+    
+    -- Validate amount
+    amount = tonumber(amount)
+    if not amount or amount <= 0 then
+        VORPcore.NotifyRightTip(source, GetTranslation("invalid_amount"), 4000)
+        return
+    end
+    
+    -- Check if player has access
+    if not HasStorageAccess(charId, storageId, playerJob, playerJobGrade) then
+        VORPcore.NotifyRightTip(source, GetTranslation("no_permission"), 4000)
+        return
+    end
+    
+    -- Check storage balance
+    DB.GetStorageBalance(storageId, function(currentBalance, ledger)
+        if currentBalance < amount then
+            VORPcore.NotifyRightTip(source, GetTranslation("insufficient_storage_funds"), 4000)
+            return
+        end
+        
+        -- Get player name
+        local playerName = Character.firstname .. " " .. Character.lastname
+        
+        -- Add ledger entry and update balance
+        DB.AddLedgerEntry(storageId, playerName, amount, "withdrawal", function(success)
+            if success then
+                -- Give money to player
+                Character.addCurrency(0, amount)
+                VORPcore.NotifyRightTip(source, GetTranslation("withdraw_success", string.format("%.2f", amount)), 4000)
+                
+                -- Update last_accessed timestamp
+                if storageCache[storageId] and not storageCache[storageId].isPreset then
+                    DB.UpdateLastAccessed(storageId)
+                end
+                
+                -- Refresh storage data for player
+                TriggerClientEvent('character_storage:updateStorageBalance', source, storageId)
+            end
+        end)
+    end)
+end)
+
+-- Get storage balance and ledger
+RegisterServerEvent('character_storage:getStorageBalance')
+AddEventHandler('character_storage:getStorageBalance', function(storageId)
+    local source = source
+    local Character = VORPcore.getUser(source).getUsedCharacter
+    local charId = Character.charIdentifier
+    local playerJob = Character.job
+    local playerJobGrade = Character.jobGrade
+    
+    -- Check if player has access
+    if not HasStorageAccess(charId, storageId, playerJob, playerJobGrade) then
+        return
+    end
+    
+    DB.GetStorageBalance(storageId, function(balance, ledger)
+        TriggerClientEvent('character_storage:receiveStorageBalance', source, storageId, balance, ledger)
+    end)
+end)

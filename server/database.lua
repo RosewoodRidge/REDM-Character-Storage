@@ -231,3 +231,54 @@ function DB.DeleteExpiredStorages(callback)
         end)
     end)
 end
+
+-- Get storage money balance
+function DB.GetStorageBalance(id, callback)
+    local query = "SELECT money_balance, ledger_history FROM character_storage WHERE id = ?"
+    exports.oxmysql:execute(query, {id}, function(result)
+        if callback then
+            if result and #result > 0 then
+                callback(tonumber(result[1].money_balance) or 0, result[1].ledger_history)
+            else
+                callback(0, nil)
+            end
+        end
+    end)
+end
+
+-- Update storage money balance and ledger
+function DB.UpdateStorageMoney(id, newBalance, ledgerHistory, callback)
+    local query = "UPDATE character_storage SET money_balance = ?, ledger_history = ? WHERE id = ?"
+    exports.oxmysql:execute(query, {newBalance, ledgerHistory, id}, function(result)
+        if callback then
+            callback(result.affectedRows > 0)
+        end
+    end)
+end
+
+-- Add ledger entry
+function DB.AddLedgerEntry(id, playerName, amount, transactionType, callback)
+    -- First get current balance and ledger
+    DB.GetStorageBalance(id, function(currentBalance, currentLedger)
+        local timestamp = os.date("%Y-%m-%d %H:%M:%S")
+        local newEntry = string.format("%s|%.2f|%s|%s", playerName, amount, transactionType, timestamp)
+        
+        local newLedger
+        if currentLedger and currentLedger ~= "" then
+            newLedger = currentLedger .. ";" .. newEntry
+        else
+            newLedger = newEntry
+        end
+        
+        -- Calculate new balance
+        local newBalance = currentBalance
+        if transactionType == "deposit" then
+            newBalance = currentBalance + amount
+        elseif transactionType == "withdrawal" then
+            newBalance = currentBalance - amount
+        end
+        
+        -- Update database
+        DB.UpdateStorageMoney(id, newBalance, newLedger, callback)
+    end)
+end

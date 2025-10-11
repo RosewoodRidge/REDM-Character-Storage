@@ -1,3 +1,6 @@
+<1.0.8>
+- Added ability for players to store money in their character storages.
+
 <1.0.6>
 - Added automatic deletion of unused storages after configurable time period (default 60 days)
 
