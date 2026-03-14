@@ -4,7 +4,7 @@ rdr3_warning 'I acknowledge that this is a prerelease build of RedM, and I am aw
 
 author 'Rosewood Ridge Team'
 description 'Character Storage System for RedM servers'
-version '1.0.9'
+version '1.1.0'
 
 -- Shared files
 shared_scripts {
