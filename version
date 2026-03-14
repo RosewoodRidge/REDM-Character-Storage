@@ -1,3 +1,37 @@
+<1.1.0>
+- Added Access Level System: players added to a storage can now be assigned "basic", "member", or "manager" roles
+  - Managers can deposit, withdraw, view ledger, and upgrade storage
+  - Members can deposit and view ledger (no withdraw)
+  - Basic users can only open the storage items
+  - Storage owners can change a player's access level at any time
+- Added configurable job-grade-to-access-level mapping (Config.ManagerJobGrades, Config.MemberJobGrades)
+- Added NPC Clerk system (client/npc.lua): spawns unkillable, persistent clerk NPCs at configurable locations with distance-based spawn/despawn
+- Added Armory Shop system (client/shop.lua): VORP Inventory-based job-locked shops with configurable items, NPC vendors, blips, and prompts
+- Added Discord Webhook integration (server/discord.lua): real-time inventory and activity tracking for preset storages and armory shops
+  - Inventory summary embeds updated on a configurable interval
+  - Activity log embeds tracking who took/added items with timestamps
+  - Automatic restore of activity history from existing Discord messages on restart
+  - Armory purchase logging to Discord
+  - Configurable per-storage and per-armory webhook settings
+- Added Config.WeaponArmoryItems: master list of weapons, ammo, and supplies for armory shops
+- Added Config.ArmoryShops: configurable armory shop locations with job-lock, NPC, blip, and Discord tracking
+- Added Config.NPCs section for clerk NPC spawning at storage locations
+- Added Config.DiscordDebug toggle for Discord webhook debug logging
+- Added Config.adminShopCommand for admin all-items shop
+- Added public_access option for preset storages (e.g., hotel rooms anyone can open)
+- Added non-linked preset storages with id_prefix/name_template pattern (e.g., individual hotel rooms)
+- Added Blackwater Hotel Rooms as a non-linked preset storage example
+- Added Blackwater Hotel Keys armory shop example
+- Added new translation keys for armory, admin shop, and access level system (English and Spanish)
+- Improved storage initialization: SendStoragesToAllPlayers now called inside LoadAllStorages callback instead of fixed timeout
+- Improved client startup: storages now requested on resource start to cover restart scenarios
+- Improved blip system: storages with blipSprite = false are explicitly skipped (no blip created)
+- Improved authorized_users format: migrated from plain number array to objects with id and level fields
+- Updated police_evidence preset: changed authorized jobs to SheriffE, SheriffW, GOVT (grade 3), and Marshals; updated Blackwater location coordinates
+- Updated doctor_main preset: updated Blackwater Doctor location coordinates; added Discord tracking
+- Fixed duplicate CreateStorageBlips function definition in old client.lua
+- Bumped version from 1.0.8 to 1.1.0
+
 <1.0.9>
 - Fixed an issue with duplicate definitions.
 
