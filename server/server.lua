@@ -27,6 +27,23 @@ function shallowcopy(orig)
     return copy
 end
 
+-- Parse authorized_users JSON — supports both old format ([123, 456]) and new format ([{id=123,level="basic"}, ...])
+function ParseAuthorizedUsers(jsonStr)
+    local ok, decoded = pcall(json.decode, jsonStr or '[]')
+    if not ok or not decoded then return {} end
+    local users = {}
+    for _, entry in ipairs(decoded) do
+        if type(entry) == "number" then
+            -- Old format: plain numeric ID — migrate to new format with basic level
+            table.insert(users, { id = tonumber(entry), level = "basic" })
+        elseif type(entry) == "table" and entry.id then
+            -- New format: object with id and level
+            table.insert(users, { id = tonumber(entry.id), level = entry.level or "basic" })
+        end
+    end
+    return users
+end
+
 -- Helper function to refresh a player's storages
 function RefreshPlayerStorages(source)
     local Character = VORPcore.getUser(source).getUsedCharacter
@@ -235,6 +252,9 @@ function LoadAllStorages()
         -- Mark initialization as complete
         initialized = true
         print(("Character storage system initialized. DB Storages: %d, Preset Configs: %d. Total in cache: %d"):format(#storages, Config.DefaultStorages and #Config.DefaultStorages or 0, table.count(storageCache)))
+        
+        -- Immediately push data to any players already connected (resource restart scenario)
+        SendStoragesToAllPlayers()
     end)
 end
 
@@ -244,9 +264,13 @@ AddEventHandler('onResourceStart', function(resourceName)
     
     LoadAllStorages()
     
-    -- Add a small delay to ensure everything is loaded properly
-    Citizen.SetTimeout(1000, function()
-        SendStoragesToAllPlayers()
+    -- SendStoragesToAllPlayers is now called inside LoadAllStorages once the DB
+    -- callback completes (initialized = true), so the 1-second fixed timeout is
+    -- no longer needed here. We keep a fallback in case of edge cases.
+    Citizen.SetTimeout(5000, function()
+        if initialized then
+            SendStoragesToAllPlayers()
+        end
     end)
 end)
 
@@ -282,10 +306,10 @@ function SendStoragesToAllPlayers()
             local User = VORPcore.getUser(source)
             if User then
                 local Character = User.getUsedCharacter
-                if Character then
+                if Character and Character.charIdentifier then
                     SendAllStoragesToPlayer(source)
                     sentCount = sentCount + 1
-                    DebugLog("Sent storage data to player " .. source .. " (Character ID: " .. Character.charIdentifier .. ")")
+                    DebugLog("Sent storage data to player " .. source .. " (Character ID: " .. tostring(Character.charIdentifier) .. ")")
                 else
                     DebugLog("Player " .. source .. " doesn't have a character selected yet")
                 end
@@ -371,71 +395,107 @@ function IsStorageOwner(charId, storageId)
     return storage and tonumber(storage.owner_charid) == tonumber(charId)
 end
 
--- Check if player has access to a storage
-function HasStorageAccess(charId, storageId, playerJob, playerJobGrade)
+-- Returns the access level string for a player on a given storage:
+--   "owner"   – full control
+--   "manager" – open, deposit, withdraw, ledger, upgrade (no rename / access-management)
+--   "member"  – open, deposit, ledger (no withdraw, no upgrade)
+--   "basic"   – open storage items only
+--   nil       – no access at all
+function GetUserAccessLevel(charId, storageId, playerJob, playerJobGrade)
     local storage = storageCache[storageId]
-    
-    if not storage then return false end
+    if not storage then return nil end
 
-    -- Handle Preset Storages
+    -- ── Preset Storages ──────────────────────────────────────────
     if storage.isPreset then
-        -- Check authorized_charids from config
+        -- Public access: anyone can open
+        if storage.public_access then
+            return "basic"
+        end
+        -- Check explicit char IDs from config
         if storage.authorized_charids_config then
             for _, allowedCharId in ipairs(storage.authorized_charids_config) do
                 if tonumber(allowedCharId) == tonumber(charId) then
-                    return true
+                    return "basic"
                 end
             end
         end
-        -- Check job-based access from config
+        -- Check job rules from config
         if playerJob and playerJobGrade ~= nil and storage.authorized_jobs_config then
             local jobRules = storage.authorized_jobs_config[playerJob]
             if jobRules then
+                local hasAccess = false
                 if jobRules.all_grades then
-                    return true
+                    hasAccess = true
                 elseif jobRules.grades then
                     for _, grade in ipairs(jobRules.grades) do
-                        if tonumber(grade) == tonumber(playerJobGrade) then
-                            return true
+                        if tonumber(playerJobGrade) >= tonumber(grade) then
+                            hasAccess = true
+                            break
                         end
                     end
                 end
+                if hasAccess then
+                    return GetJobGradeAccessLevel(playerJobGrade)
+                end
             end
         end
-        return false -- If no explicit charid or job match for preset
+        return nil
     end
-    
-    -- Owner always has access (for DB storages)
+
+    -- ── DB Storages ───────────────────────────────────────────────
+    -- Owner has full control
     if tonumber(storage.owner_charid) == tonumber(charId) then
-        return true
+        return "owner"
     end
-    
-    -- Check authorized users (personal access)
-    local authorizedUsers = json.decode(storage.authorized_users or '[]')
-    for _, id in pairs(authorizedUsers) do
-        if tonumber(id) == tonumber(charId) then
-            return true
+
+    -- Check personal authorized_users list (new + legacy format)
+    local authorizedUsers = ParseAuthorizedUsers(storage.authorized_users)
+    for _, user in ipairs(authorizedUsers) do
+        if user.id == tonumber(charId) then
+            return user.level or "basic"
         end
     end
 
-    -- Check job-based access
+    -- Check job-based access rules
     if playerJob and playerJobGrade ~= nil then
         local authorizedJobs = json.decode(storage.authorized_jobs or '{}')
         if authorizedJobs[playerJob] then
             local jobRule = authorizedJobs[playerJob]
+            local hasAccess = false
             if jobRule.all_grades then
-                return true
+                hasAccess = true
             elseif jobRule.grades then
                 for _, grade in ipairs(jobRule.grades) do
-                    if tonumber(grade) == tonumber(playerJobGrade) then
-                        return true
+                    if tonumber(playerJobGrade) >= tonumber(grade) then
+                        hasAccess = true
+                        break
                     end
                 end
             end
+            if hasAccess then
+                return GetJobGradeAccessLevel(playerJobGrade)
+            end
         end
     end
-    
-    return false
+
+    return nil
+end
+
+-- Helper: map a numeric job grade to an access-level string using Config settings
+function GetJobGradeAccessLevel(grade)
+    local numGrade = tonumber(grade) or 0
+    for _, mgrGrade in ipairs(Config.ManagerJobGrades or {}) do
+        if numGrade == tonumber(mgrGrade) then return "manager" end
+    end
+    for _, memGrade in ipairs(Config.MemberJobGrades or {}) do
+        if numGrade == tonumber(memGrade) then return "member" end
+    end
+    return "basic"
+end
+
+-- Legacy wrapper — returns true when the player has ANY level of access
+function HasStorageAccess(charId, storageId, playerJob, playerJobGrade)
+    return GetUserAccessLevel(charId, storageId, playerJob, playerJobGrade) ~= nil
 end
 
 -- Create a new storage
@@ -562,6 +622,13 @@ AddEventHandler("character_storage:openStorage", function(storageId)
     
     -- Open the inventory directly
     DebugLog("Opening inventory " .. inventoryName .. " for player " .. _source)
+
+    -- Discord tracking: record who opened this storage
+    if DiscordTracker and DiscordTracker.OnStorageOpened then
+        local charName = Character.firstname .. " " .. Character.lastname
+        DiscordTracker.OnStorageOpened(_source, storageId, charId, charName)
+    end
+
     VORPinv:openInventory(_source, inventoryName)
 end)
 
@@ -610,6 +677,13 @@ AddEventHandler('character_storage:checkOwnership', function(storageId)
             if not VORPinv:isCustomInventoryRegistered(prefix) then
                  RegisterStorageInventory(storageId, storageData.capacity, storageData)
             end
+
+            -- Discord tracking: record who opened this storage
+            if DiscordTracker and DiscordTracker.OnStorageOpened then
+                local charName = Character.firstname .. " " .. Character.lastname
+                DiscordTracker.OnStorageOpened(source, storageId, charId, charName)
+            end
+
             VORPinv:openInventory(source, prefix)
         else
             VORPcore.NotifyRightTip(source, GetTranslation("no_permission"), 4000)
@@ -621,12 +695,26 @@ AddEventHandler('character_storage:checkOwnership', function(storageId)
     DebugLog("Updating last_accessed timestamp for regular storage #" .. storageId .. " (checkOwnership call)")
     DB.UpdateLastAccessed(storageId)
     
-    -- If player is owner (DB storage), show the owner menu
+    -- Determine player's access level on this storage
+    local accessLevel = GetUserAccessLevel(charId, storageId, playerJob, playerJobGrade)
+    if group == "admin" and not accessLevel then accessLevel = "basic" end
+
+    -- Owner → full owner menu
     if IsStorageOwner(charId, storageId) then
-        TriggerClientEvent('character_storage:openOwnerMenu', source, storageId)
-    -- If player has access (personal, job, or admin), open storage directly
-    elseif HasStorageAccess(charId, storageId, playerJob, playerJobGrade) or group == "admin" then
+        TriggerClientEvent('character_storage:openOwnerMenu', source, storageId, "owner")
+    -- Manager / Member → management menu (filtered by level client-side)
+    elseif accessLevel == "manager" or accessLevel == "member" then
+        TriggerClientEvent('character_storage:openOwnerMenu', source, storageId, accessLevel)
+    -- Basic (or admin fallback) → open inventory directly
+    elseif accessLevel == "basic" then
         local prefix = "character_storage_" .. storageId
+
+        -- Discord tracking: record who opened this storage
+        if DiscordTracker and DiscordTracker.OnStorageOpened then
+            local charName = Character.firstname .. " " .. Character.lastname
+            DiscordTracker.OnStorageOpened(source, storageId, charId, charName)
+        end
+
         VORPinv:openInventory(source, prefix)
     else
         VORPcore.NotifyRightTip(source, GetTranslation("no_permission"), 4000)
@@ -671,20 +759,20 @@ AddEventHandler('character_storage:addUser', function(storageId, firstname, last
             return
         end
         
-        -- Update authorized users
+        -- Update authorized users (using new format, migrating old entries)
         local storage = storageCache[storageId]
-        local authorizedUsers = json.decode(storage.authorized_users or '[]')
+        local authorizedUsers = ParseAuthorizedUsers(storage.authorized_users)
         
         -- Check if user is already authorized
-        for _, id in pairs(authorizedUsers) do
-            if tonumber(id) == tonumber(targetCharId) then
+        for _, user in ipairs(authorizedUsers) do
+            if user.id == tonumber(targetCharId) then
                 VORPcore.NotifyRightTip(source, GetTranslation("already_has_access"), 4000)
                 return
             end
         end
         
-        -- Add user to authorized users
-        table.insert(authorizedUsers, targetCharId)
+        -- Add user with default basic level
+        table.insert(authorizedUsers, { id = tonumber(targetCharId), level = "basic" })
         
         -- Update database
         DB.UpdateAuthorizedUsers(storageId, json.encode(authorizedUsers), function(success)
@@ -726,6 +814,130 @@ function GetPlayerSourceFromCharId(charId)
     return nil
 end
 
+-- -------------------------------------------------------
+-- Add user to storage by character ID with access level
+-- This is the primary "add player" path used by the UI.
+-- -------------------------------------------------------
+RegisterServerEvent('character_storage:addUserById')
+AddEventHandler('character_storage:addUserById', function(storageId, targetCharId, accessLevel)
+    local source = source
+    local Character = VORPcore.getUser(source).getUsedCharacter
+    local charId = Character.charIdentifier
+
+    storageId      = tonumber(storageId)
+    targetCharId   = tonumber(targetCharId)
+    accessLevel    = accessLevel or "basic"
+
+    -- Validate access level
+    if accessLevel ~= "basic" and accessLevel ~= "member" and accessLevel ~= "manager" then
+        accessLevel = "basic"
+    end
+
+    if storageCache[storageId] and storageCache[storageId].isPreset then
+        VORPcore.NotifyRightTip(source, "Preset storages cannot be managed this way.", 4000)
+        return
+    end
+
+    if not IsStorageOwner(charId, storageId) then
+        VORPcore.NotifyRightTip(source, GetTranslation("no_permission"), 4000)
+        return
+    end
+
+    if not targetCharId or tonumber(targetCharId) == tonumber(charId) then
+        VORPcore.NotifyRightTip(source, GetTranslation("player_not_found"), 4000)
+        return
+    end
+
+    local storage = storageCache[storageId]
+    local authorizedUsers = ParseAuthorizedUsers(storage.authorized_users)
+
+    for _, user in ipairs(authorizedUsers) do
+        if user.id == tonumber(targetCharId) then
+            VORPcore.NotifyRightTip(source, GetTranslation("already_has_access"), 4000)
+            return
+        end
+    end
+
+    table.insert(authorizedUsers, { id = tonumber(targetCharId), level = accessLevel })
+    local newJson = json.encode(authorizedUsers)
+
+    DB.UpdateAuthorizedUsers(storageId, newJson, function(success)
+        if success then
+            storage.authorized_users = newJson
+            VORPcore.NotifyRightTip(source, GetTranslation("player_added"), 4000)
+            RefreshPlayerStorages(source)
+
+            local targetSource = GetPlayerSourceFromCharId(targetCharId)
+            if targetSource then
+                local storageName = storage.storage_name or "Storage #" .. storageId
+                local ownerName = Character.firstname .. " " .. Character.lastname
+                TriggerClientEvent('character_storage:notifyAccessGranted', targetSource, storageName, ownerName)
+                RefreshPlayerStorages(targetSource)
+            end
+        end
+    end)
+end)
+
+-- -------------------------------------------------------
+-- Change an existing user's access level
+-- -------------------------------------------------------
+RegisterServerEvent('character_storage:changeUserLevel')
+AddEventHandler('character_storage:changeUserLevel', function(storageId, targetCharId, newLevel)
+    local source = source
+    local Character = VORPcore.getUser(source).getUsedCharacter
+    local charId = Character.charIdentifier
+
+    storageId    = tonumber(storageId)
+    targetCharId = tonumber(targetCharId)
+    newLevel     = newLevel or "basic"
+
+    if newLevel ~= "basic" and newLevel ~= "member" and newLevel ~= "manager" then
+        newLevel = "basic"
+    end
+
+    if storageCache[storageId] and storageCache[storageId].isPreset then
+        VORPcore.NotifyRightTip(source, "Preset storages cannot be managed this way.", 4000)
+        return
+    end
+
+    if not IsStorageOwner(charId, storageId) then
+        VORPcore.NotifyRightTip(source, GetTranslation("no_permission"), 4000)
+        return
+    end
+
+    local storage = storageCache[storageId]
+    local authorizedUsers = ParseAuthorizedUsers(storage.authorized_users)
+    local found = false
+
+    for i, user in ipairs(authorizedUsers) do
+        if user.id == tonumber(targetCharId) then
+            authorizedUsers[i].level = newLevel
+            found = true
+            break
+        end
+    end
+
+    if not found then
+        VORPcore.NotifyRightTip(source, GetTranslation("player_not_found"), 4000)
+        return
+    end
+
+    local newJson = json.encode(authorizedUsers)
+    DB.UpdateAuthorizedUsers(storageId, newJson, function(success)
+        if success then
+            storage.authorized_users = newJson
+            local levelLabel = GetTranslation("access_level_" .. newLevel)
+            VORPcore.NotifyRightTip(source, GetTranslation("level_updated", levelLabel, "player"), 4000)
+            RefreshPlayerStorages(source)
+
+            local targetSource = GetPlayerSourceFromCharId(targetCharId)
+            if targetSource then
+                RefreshPlayerStorages(targetSource)
+            end
+        end
+    end)
+end)
+
 -- Remove user from storage access list
 RegisterServerEvent('character_storage:removeUser')
 AddEventHandler('character_storage:removeUser', function(storageId, targetCharId)
@@ -745,15 +957,15 @@ AddEventHandler('character_storage:removeUser', function(storageId, targetCharId
         return
     end
     
-    -- Update authorized users
+    -- Update authorized users (new format; migrates old entries)
     local storage = storageCache[storageId]
-    local authorizedUsers = json.decode(storage.authorized_users or '[]')
+    local authorizedUsers = ParseAuthorizedUsers(storage.authorized_users)
     local newAuthorizedUsers = {}
     
-    -- Filter out the target user
-    for _, id in pairs(authorizedUsers) do
-        if tonumber(id) ~= tonumber(targetCharId) then
-            table.insert(newAuthorizedUsers, id)
+    -- Filter out the target user (preserve objects)
+    for _, user in ipairs(authorizedUsers) do
+        if user.id ~= tonumber(targetCharId) then
+            table.insert(newAuthorizedUsers, user)
         end
     end
     
@@ -827,17 +1039,7 @@ AddEventHandler('character_storage:removeAccess', function(storageId, targetChar
     -- Get current authorized users
     DebugLog("Raw authorized_users JSON: " .. tostring(storage.authorized_users))
     
-    local authorizedUsers = {}
-    -- Safely parse JSON
-    local success = pcall(function() 
-        authorizedUsers = json.decode(storage.authorized_users or '[]')
-    end)
-    
-    if not success then
-        DebugLog("ERROR: Failed to parse authorized_users JSON")
-        VORPcore.NotifyRightTip(source, "Error processing storage data", 4000)
-        return
-    end
+    local authorizedUsers = ParseAuthorizedUsers(storage.authorized_users)
     
     DebugLog("Current authorized users: " .. json.encode(authorizedUsers))
     
@@ -846,12 +1048,18 @@ AddEventHandler('character_storage:removeAccess', function(storageId, targetChar
     local wasRemoved = false
     local targetSource = nil
     
-    for _, id in pairs(authorizedUsers) do
-        if tonumber(id) ~= targetCharId then
-            table.insert(newAuthorizedUsers, tonumber(id))
+    for _, user in ipairs(authorizedUsers) do
+        local uid = type(user) == "table" and user.id or tonumber(user)
+        if uid ~= targetCharId then
+            -- Preserve full object (or upgrade legacy numeric entry)
+            if type(user) == "table" then
+                table.insert(newAuthorizedUsers, user)
+            else
+                table.insert(newAuthorizedUsers, { id = tonumber(user), level = "basic" })
+            end
         else
             wasRemoved = true
-            DebugLog("User " .. id .. " will be removed")
+            DebugLog("User " .. tostring(uid) .. " will be removed")
             -- Find target player's source if they're online
             targetSource = GetPlayerSourceFromCharId(targetCharId)
         end
@@ -914,12 +1122,15 @@ AddEventHandler('character_storage:upgradeStorage', function(storageId)
         return
     end
     
-    -- Check if player is storage owner
-    if not IsStorageOwner(charId, storageId) then
+    -- Check if player is owner or has manager-level access
+    local playerJob = Character.job
+    local playerJobGrade = Character.jobGrade
+    local accessLevel = GetUserAccessLevel(charId, storageId, playerJob, playerJobGrade)
+    if accessLevel ~= "owner" and accessLevel ~= "manager" then
         VORPcore.NotifyRightTip(source, GetTranslation("no_permission"), 4000)
         return
     end
-    
+
     local storage = storageCache[storageId]
     local currentCapacity = tonumber(storage.capacity) or Config.DefaultCapacity
     
@@ -1120,7 +1331,8 @@ end, false)
 RegisterServerEvent('character_storage:getPlayerStorages')
 AddEventHandler('character_storage:getPlayerStorages', function()
     local source = source
-    RefreshPlayerStorages(source)
+    -- Send ALL storages (DB + presets) so the client prompt works correctly
+    SendAllStoragesToPlayer(source)
 end)
 
 -- Get all online players with their positions
@@ -1304,8 +1516,9 @@ AddEventHandler('character_storage:depositMoney', function(storageId, amount)
         return
     end
     
-    -- Check if player has access
-    if not HasStorageAccess(charId, storageId, playerJob, playerJobGrade) then
+    -- Deposit requires at least member-level access
+    local depositAccessLevel = GetUserAccessLevel(charId, storageId, playerJob, playerJobGrade)
+    if not depositAccessLevel or depositAccessLevel == "basic" then
         VORPcore.NotifyRightTip(source, GetTranslation("no_permission"), 4000)
         return
     end
@@ -1354,8 +1567,9 @@ AddEventHandler('character_storage:withdrawMoney', function(storageId, amount)
         return
     end
     
-    -- Check if player has access
-    if not HasStorageAccess(charId, storageId, playerJob, playerJobGrade) then
+    -- Withdraw requires manager-level access or higher
+    local withdrawAccessLevel = GetUserAccessLevel(charId, storageId, playerJob, playerJobGrade)
+    if withdrawAccessLevel ~= "owner" and withdrawAccessLevel ~= "manager" then
         VORPcore.NotifyRightTip(source, GetTranslation("no_permission"), 4000)
         return
     end
@@ -1398,12 +1612,488 @@ AddEventHandler('character_storage:getStorageBalance', function(storageId)
     local playerJob = Character.job
     local playerJobGrade = Character.jobGrade
     
-    -- Check if player has access
-    if not HasStorageAccess(charId, storageId, playerJob, playerJobGrade) then
+    -- Viewing balance/ledger requires at least member-level access
+    local balanceAccessLevel = GetUserAccessLevel(charId, storageId, playerJob, playerJobGrade)
+    if not balanceAccessLevel or balanceAccessLevel == "basic" then
         return
     end
     
     DB.GetStorageBalance(storageId, function(balance, ledger)
         TriggerClientEvent('character_storage:receiveStorageBalance', source, storageId, balance, ledger)
+    end)
+end)
+
+-- ============================================================
+-- Armory Shop System — Store NUI Type (Infinite Virtual Stock)
+-- Uses VORP inventory's built-in "store" NUI. Items are virtual
+-- and NEVER consumed — the grid always shows the full catalogue.
+-- Taking an item fires syn_store:TakeFromStore which we handle
+-- server-side to give the item and charge the player.
+-- ============================================================
+
+-- Store ID prefix for armory shops (must not collide with syn_stores IDs)
+local ARMORY_STORE_PREFIX = "cs_armory_"
+
+-- Map of armory store IDs → shop config: { [storeId] = shopConfig }
+local ArmoryStoreMap = {}
+
+-- -------------------------------------------------------
+-- Helpers
+-- -------------------------------------------------------
+
+local function GetArmoryShopById(shopId)
+    if not Config.ArmoryShops then return nil end
+    for _, shop in ipairs(Config.ArmoryShops) do
+        if shop.id == shopId then return shop end
+    end
+    return nil
+end
+
+local function GetArmoryStoreId(shop)
+    return ARMORY_STORE_PREFIX .. shop.id
+end
+
+local function HasArmoryAccess(playerJob, joblockList)
+    if not joblockList or #joblockList == 0 then return true end
+    for _, allowedJob in ipairs(joblockList) do
+        if playerJob == allowedJob then return true end
+    end
+    return false
+end
+
+--- Build green HTML price string shown in the item description
+local function FormatPriceDesc(price)
+    if tonumber(price) == 0 then
+        return "<span style='color:#4CAF50;font-weight:bold;'>Price: Free</span>"
+    else
+        return string.format("<span style='color:#4CAF50;font-weight:bold;'>Price: $%.2f</span>", tonumber(price))
+    end
+end
+
+--- Build the full item payload to populate the store grid.
+--- This is sent via vorp_inventory:ReloadStoreInventory.
+local function BuildArmoryStorePayload(shop, _source)
+    local itemList = {}
+    for idx, itemConf in ipairs(shop.sellitems) do
+        local priceHtml = FormatPriceDesc(itemConf.price)
+        if itemConf.type == 'item_weapon' then
+            table.insert(itemList, {
+                id           = idx,
+                name         = itemConf.name,
+                label        = itemConf.label,
+                count        = 1,
+                type         = "item_weapon",
+                desc         = priceHtml,
+                custom_desc  = priceHtml,
+                custom_label = itemConf.label,
+                serial_number = "",
+                group        = 5,
+                metadata     = {},
+            })
+        else
+            table.insert(itemList, {
+                id       = idx,
+                name     = itemConf.name,
+                label    = itemConf.label,
+                count    = 999,
+                type     = "item_standard",
+                desc     = priceHtml,
+                metadata = { description = priceHtml },
+            })
+        end
+    end
+    return {
+        itemList = itemList,
+        action   = "setSecondInventoryItems",
+        info     = { target = _source or 0, source = _source or 0 },
+    }
+end
+
+-- -------------------------------------------------------
+-- Build the ArmoryStoreMap on load
+-- -------------------------------------------------------
+
+Citizen.CreateThread(function()
+    Citizen.Wait(2000)
+    if not Config.ArmoryShops then return end
+    for _, shop in ipairs(Config.ArmoryShops) do
+        local storeId = GetArmoryStoreId(shop)
+        ArmoryStoreMap[storeId] = shop
+    end
+    print("[ArmoryShop] Registered " .. #Config.ArmoryShops .. " armory store(s) (store NUI mode)")
+end)
+
+-- -------------------------------------------------------
+-- Client → Server: Open Armory Store
+-- -------------------------------------------------------
+
+RegisterServerEvent('character_storage:armoryOpenStore')
+AddEventHandler('character_storage:armoryOpenStore', function(shopId)
+    local _source = source
+    local User = VORPcore.getUser(_source)
+    if not User then return end
+    local Character = User.getUsedCharacter
+    if not Character then return end
+
+    local shop = GetArmoryShopById(shopId)
+    if not shop then
+        DebugLog("Armory: shop not found: " .. tostring(shopId))
+        return
+    end
+
+    -- Verify job access server-side
+    if not HasArmoryAccess(Character.job, shop.joblock) then
+        TriggerClientEvent('character_storage:armoryAccessDenied', _source)
+        return
+    end
+
+    local storeId = GetArmoryStoreId(shop)
+
+    -- geninfo tells the store NUI this is a customer view with no sell-back
+    local geninfo = {
+        shoptype  = 1,
+        isowner   = 0,
+        buyitems  = {},   -- empty = player can't sell items TO the store
+        sellitems = {},
+    }
+
+    -- 1) Open the store NUI (sets store mode + geninfo on client)
+    TriggerClientEvent("vorp_inventory:OpenStoreInventory", _source, shop.Name, storeId, "oo", geninfo)
+
+    -- 2) Small delay so the NUI frame renders, then send items
+    SetTimeout(300, function()
+        local payload = BuildArmoryStorePayload(shop, _source)
+        TriggerClientEvent("vorp_inventory:ReloadStoreInventory", _source, json.encode(payload), false)
+    end)
+
+    DebugLog("Opened armory store " .. storeId .. " for player " .. _source)
+end)
+
+-- -------------------------------------------------------
+-- syn_store:TakeFromStore — Handle armory purchases
+-- When a player drags an item from the store to their
+-- inventory, the NUI fires this event. We check if the
+-- store belongs to one of our armory shops and, if so,
+-- give the item and charge the player. Then we reload
+-- the store grid (same items) to reset SynPending and
+-- keep the catalogue intact.
+-- -------------------------------------------------------
+
+RegisterServerEvent('syn_store:TakeFromStore')
+AddEventHandler('syn_store:TakeFromStore', function(obj)
+    local _source = source
+    local ok, data = pcall(json.decode, obj)
+    if not ok or not data then return end
+
+    local storeId = data.store
+    if not storeId or not ArmoryStoreMap[storeId] then return end -- not ours
+
+    local shop = ArmoryStoreMap[storeId]
+    local item = data.item
+    local amount = tonumber(data.number) or 1
+    if not item or not item.name then return end
+
+    -- Look up the item config from the shop's sell list
+    local itemConfig = nil
+    for _, conf in ipairs(shop.sellitems) do
+        if conf.name == item.name then
+            itemConfig = conf
+            break
+        end
+    end
+    if not itemConfig then
+        DebugLog("Armory take: unknown item " .. tostring(item.name))
+        -- Still reload to reset SynPending
+        local payload = BuildArmoryStorePayload(shop, _source)
+        TriggerClientEvent("vorp_inventory:ReloadStoreInventory", _source, json.encode(payload), false)
+        return
+    end
+
+    -- Get player info
+    local User = VORPcore.getUser(_source)
+    if not User then return end
+    local Character = User.getUsedCharacter
+    if not Character then return end
+
+    local price = tonumber(itemConfig.price) or 0
+    local currType = Config.ArmoryCurrencyType or 0
+    local qty = (itemConfig.type == 'item_weapon') and 1 or math.max(1, amount)
+    local totalPrice = price * qty
+
+    -- Check if player can afford
+    if totalPrice > 0 then
+        local playerMoney = (currType == 0) and Character.money or Character.gold
+        if playerMoney < totalPrice then
+            VORPcore.NotifyRightTip(_source, "Not enough money", 4000)
+            local payload = BuildArmoryStorePayload(shop, _source)
+            TriggerClientEvent("vorp_inventory:ReloadStoreInventory", _source, json.encode(payload), false)
+            return
+        end
+    end
+
+    -- Give item
+    if itemConfig.type == 'item_weapon' then
+        VORPinv:createWeapon(_source, item.name, {})
+    else
+        VORPinv:addItem(_source, item.name, qty)
+    end
+
+    -- Charge the player
+    if totalPrice > 0 then
+        Character.removeCurrency(currType, totalPrice)
+    end
+
+    -- Small delay so VORPinv updates the client's main inventory, then reload store
+    SetTimeout(500, function()
+        local payload = BuildArmoryStorePayload(shop, _source)
+        TriggerClientEvent("vorp_inventory:ReloadStoreInventory", _source, json.encode(payload), false)
+    end)
+
+    local charName = Character.firstname .. " " .. Character.lastname
+    local charId = Character.charIdentifier
+    DebugLog("Armory purchase: " .. charName .. " took x" .. qty .. " " .. itemConfig.label .. " from " .. shop.Name .. " for $" .. totalPrice)
+
+    -- Discord activity logging
+    if DiscordTracker and DiscordTracker.LogArmoryPurchase then
+        DiscordTracker.LogArmoryPurchase(shop.id, charId, charName, itemConfig.label .. " x" .. qty, totalPrice)
+    end
+end)
+
+-- -------------------------------------------------------
+-- syn_store:MoveToStore — Block storing items in armory
+-- If a player drags an item from their inventory to the
+-- armory store, we block it and reload to restore the UI.
+-- -------------------------------------------------------
+
+RegisterServerEvent('syn_store:MoveToStore')
+AddEventHandler('syn_store:MoveToStore', function(obj)
+    local _source = source
+    local ok, data = pcall(json.decode, obj)
+    if not ok or not data then return end
+
+    local storeId = data.store
+    if not storeId or not ArmoryStoreMap[storeId] then return end -- not ours
+
+    local shop = ArmoryStoreMap[storeId]
+    VORPcore.NotifyRightTip(_source, "Cannot store items in the armory", 3000)
+
+    -- Reload to restore the player's inventory in the NUI
+    SetTimeout(200, function()
+        local payload = BuildArmoryStorePayload(shop, _source)
+        TriggerClientEvent("vorp_inventory:ReloadStoreInventory", _source, json.encode(payload), false)
+    end)
+end)
+
+-- ============================================================
+-- Admin Shop — All Items Store (admin-only command)
+-- Queries the DB `items` table + VORP SharedData.Weapons to
+-- build a full alphabetical catalogue. Opens the same store
+-- NUI so items are infinite / virtual. Completely free.
+-- ============================================================
+
+local ADMIN_STORE_ID = "cs_admin_shop"
+local AdminShopItemCache = nil   -- populated lazily on first use
+local AdminShopCacheTime = 0     -- timestamp of last cache build
+local ADMIN_CACHE_TTL = 300      -- rebuild cache every 5 minutes
+
+--- Build (or return cached) alphabetical item list from DB + weapons
+local function GetAdminShopItems(cb)
+    local now = os.time()
+    if AdminShopItemCache and (now - AdminShopCacheTime) < ADMIN_CACHE_TTL then
+        return cb(AdminShopItemCache)
+    end
+
+    exports.oxmysql:execute("SELECT item, label, `limit`, `desc`, type FROM items ORDER BY label ASC", {}, function(dbItems)
+        local items = {}
+        local seen = {}  -- track names to avoid duplicates
+
+        -- 1) Add all DB items (standard items)
+        if dbItems then
+            for _, row in ipairs(dbItems) do
+                if row.item and row.label then
+                    table.insert(items, {
+                        name  = row.item,
+                        label = row.label,
+                        type  = "item_standard",
+                        desc  = row.desc or "",
+                    })
+                    seen[row.item] = true
+                end
+            end
+        end
+
+        -- 2) Add all weapons from VORP SharedData.Weapons
+        if SharedData and SharedData.Weapons then
+            for hashName, wpn in pairs(SharedData.Weapons) do
+                if not seen[hashName] then
+                    table.insert(items, {
+                        name  = hashName,
+                        label = wpn.Name or hashName,
+                        type  = "item_weapon",
+                        desc  = wpn.Desc or "",
+                    })
+                    seen[hashName] = true
+                end
+            end
+        end
+
+        -- 3) Sort alphabetically by label (case-insensitive)
+        table.sort(items, function(a, b)
+            return string.lower(a.label) < string.lower(b.label)
+        end)
+
+        AdminShopItemCache = items
+        AdminShopCacheTime = now
+        DebugLog("Admin shop cache built: " .. #items .. " items")
+        cb(items)
+    end)
+end
+
+--- Build the store NUI payload from the admin item list
+local function BuildAdminStorePayload(items, _source)
+    local itemList = {}
+    for idx, it in ipairs(items) do
+        local freeHtml = "<span style='color:#4CAF50;font-weight:bold;'>Free</span>"
+        if it.type == "item_weapon" then
+            table.insert(itemList, {
+                id            = idx,
+                name          = it.name,
+                label         = it.label,
+                count         = 1,
+                type          = "item_weapon",
+                desc          = freeHtml,
+                custom_desc   = freeHtml,
+                custom_label  = it.label,
+                serial_number = "",
+                group         = 5,
+                metadata      = {},
+            })
+        else
+            table.insert(itemList, {
+                id       = idx,
+                name     = it.name,
+                label    = it.label,
+                count    = 999,
+                type     = "item_standard",
+                desc     = freeHtml,
+                metadata = { description = freeHtml },
+            })
+        end
+    end
+    return {
+        itemList = itemList,
+        action   = "setSecondInventoryItems",
+        info     = { target = _source or 0, source = _source or 0 },
+    }
+end
+
+-- -------------------------------------------------------
+-- /adminshop command
+-- -------------------------------------------------------
+
+RegisterCommand(Config.adminShopCommand or 'adminshop', function(_source, args, rawCommand)
+    if _source == 0 then print("[AdminShop] Cannot run from console") return end
+
+    local User = VORPcore.getUser(_source)
+    if not User then return end
+    local Character = User.getUsedCharacter
+    if not Character then return end
+
+    -- Admin check (same pattern as existing admin commands)
+    if Character.group ~= "admin" then
+        VORPcore.NotifyRightTip(_source, GetTranslation("adminshop_not_admin") or "Admin only", 4000)
+        return
+    end
+
+    VORPcore.NotifyRightTip(_source, GetTranslation("adminshop_loading") or "Loading...", 2000)
+
+    GetAdminShopItems(function(items)
+        if not items or #items == 0 then
+            VORPcore.NotifyRightTip(_source, "No items found in database", 4000)
+            return
+        end
+
+        local storeName = GetTranslation("adminshop_name") or "Admin Item Shop"
+        local geninfo = {
+            shoptype  = 1,
+            isowner   = 0,
+            buyitems  = {},
+            sellitems = {},
+        }
+
+        -- Open the store NUI
+        TriggerClientEvent("vorp_inventory:OpenStoreInventory", _source, storeName, ADMIN_STORE_ID, "oo", geninfo)
+
+        -- Send item list after a short delay
+        SetTimeout(300, function()
+            local payload = BuildAdminStorePayload(items, _source)
+            TriggerClientEvent("vorp_inventory:ReloadStoreInventory", _source, json.encode(payload), false)
+        end)
+
+        DebugLog("Admin " .. Character.firstname .. " " .. Character.lastname .. " opened admin shop (" .. #items .. " items)")
+    end)
+end, false)
+
+-- -------------------------------------------------------
+-- syn_store:TakeFromStore — Admin shop purchases (free)
+-- We hook the same event; if storeId matches ADMIN_STORE_ID
+-- we give the item for free. The armory handler above
+-- already returns early for non-armory stores, and this
+-- handler returns early for non-admin-shop stores.
+-- -------------------------------------------------------
+
+-- Note: We piggyback on the existing syn_store:TakeFromStore.
+-- FiveM/RedM allows MULTIPLE handlers for the same event.
+-- The armory handler above checks ArmoryStoreMap and returns
+-- early if the store isn't an armory. This handler checks
+-- for ADMIN_STORE_ID and returns early otherwise.
+
+AddEventHandler('syn_store:TakeFromStore', function(obj)
+    local _source = source
+    local ok, data = pcall(json.decode, obj)
+    if not ok or not data then return end
+
+    if data.store ~= ADMIN_STORE_ID then return end -- not ours
+
+    local item = data.item
+    local amount = tonumber(data.number) or 1
+    if not item or not item.name then return end
+
+    -- Re-verify admin
+    local User = VORPcore.getUser(_source)
+    if not User then return end
+    local Character = User.getUsedCharacter
+    if not Character then return end
+    if Character.group ~= "admin" then return end
+
+    -- Give item (free)
+    if item.type == "item_weapon" then
+        VORPinv:createWeapon(_source, item.name, {})
+    else
+        VORPinv:addItem(_source, item.name, math.max(1, amount))
+    end
+
+    DebugLog("Admin shop: " .. Character.firstname .. " " .. Character.lastname .. " took x" .. amount .. " " .. item.name)
+
+    -- Reload the store to reset SynPending
+    GetAdminShopItems(function(items)
+        local payload = BuildAdminStorePayload(items, _source)
+        TriggerClientEvent("vorp_inventory:ReloadStoreInventory", _source, json.encode(payload), false)
+    end)
+end)
+
+-- Block storing into admin shop
+AddEventHandler('syn_store:MoveToStore', function(obj)
+    local _source = source
+    local ok, data = pcall(json.decode, obj)
+    if not ok or not data then return end
+
+    if data.store ~= ADMIN_STORE_ID then return end
+
+    VORPcore.NotifyRightTip(_source, "Cannot store items here", 3000)
+
+    GetAdminShopItems(function(items)
+        local payload = BuildAdminStorePayload(items, _source)
+        TriggerClientEvent("vorp_inventory:ReloadStoreInventory", _source, json.encode(payload), false)
     end)
 end)

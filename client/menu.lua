@@ -6,6 +6,7 @@ local playerStorages = {}
 -- Add variables to store nearby players data and current storage ID
 local nearbyPlayers = {}
 local currentStorageId = nil
+local currentAccessLevel = "owner" -- Tracks the access level for the currently open storage menu
 
 local function UpdateStorages(storages)
     playerStorages = storages
@@ -66,76 +67,84 @@ function GetCharacterName(charId, cb)
     TriggerServerEvent("character_storage:getCharacterName", charId, callbackId)
 end
 
--- Owner menu for storage
-function OpenOwnerStorageMenu(storageId)
+-- Storage management menu (content varies by access level)
+-- accessLevel: "owner" | "manager" | "member"
+function OpenOwnerStorageMenu(storageId, accessLevel)
     MenuData.CloseAll()
-    
-    -- Get the storage name and balance
+    accessLevel = accessLevel or "owner"
+    currentAccessLevel = accessLevel  -- store for sub-menu back-navigation
+
+    -- Get storage details
     local storageName = GetTranslation("storage_title", storageId)
     local currentCapacity = Config.DefaultCapacity
     local storageBalance = 0
-    
-    -- Find storage details
+
     for _, storage in pairs(playerStorages) do
         if storage.id == storageId then
-            storageName = storage.storage_name or GetTranslation("storage_title", storageId)
+            storageName = storage.storage_name or storageName
             currentCapacity = tonumber(storage.capacity) or Config.DefaultCapacity
             storageBalance = tonumber(storage.money_balance) or 0
             break
         end
     end
-    
-    -- Calculate the upgrade price based on how many upgrades have been done
+
     local previousUpgrades = math.floor((currentCapacity - Config.DefaultCapacity) / Config.StorageUpgradeSlots)
     local upgradePrice = math.floor(Config.StorageUpgradePrice * math.pow((1 + Config.StorageUpgradePriceMultiplier), previousUpgrades))
-    
+
+    -- Build elements based on access level
     local elements = {
         {
             label = GetTranslation("open_storage"),
             value = "open",
             desc = GetTranslation("open_storage_desc")
         },
-        {
-            label = GetTranslation("deposit_money"),
-            value = "deposit",
-            desc = GetTranslation("deposit_money_desc")
-        },
-        {
-            label = GetTranslation("withdraw_money"),
-            value = "withdraw",
-            desc = GetTranslation("withdraw_money_desc")
-        },
-        {
-            label = GetTranslation("view_ledger"),
-            value = "ledger",
-            desc = GetTranslation("view_ledger_desc")
-        },
-        {
-            label = GetTranslation("rename_storage"),
-            value = "rename",
-            desc = GetTranslation("rename_storage_desc")
-        },
-        {
-            label = GetTranslation("access_management_option"),
-            value = "access",
-            desc = GetTranslation("manage_access_desc")
-        },
-        {
-            label = GetTranslation("upgrade_storage", upgradePrice),
-            value = "upgrade",
-            desc = GetTranslation("upgrade_storage_desc", Config.StorageUpgradeSlots)
-        },
-        {
-            label = GetTranslation("close_menu"),
-            value = "close",
-            desc = ""
-        }
     }
-    
+
+    -- Deposit: owner, manager, member
+    if accessLevel == "owner" or accessLevel == "manager" or accessLevel == "member" then
+        table.insert(elements, { label = GetTranslation("deposit_money"), value = "deposit", desc = GetTranslation("deposit_money_desc") })
+    end
+
+    -- Withdraw: owner, manager only
+    if accessLevel == "owner" or accessLevel == "manager" then
+        table.insert(elements, { label = GetTranslation("withdraw_money"), value = "withdraw", desc = GetTranslation("withdraw_money_desc") })
+    end
+
+    -- Ledger: owner, manager, member
+    if accessLevel == "owner" or accessLevel == "manager" or accessLevel == "member" then
+        table.insert(elements, { label = GetTranslation("view_ledger"), value = "ledger", desc = GetTranslation("view_ledger_desc") })
+    end
+
+    -- Rename storage: owner only
+    if accessLevel == "owner" then
+        table.insert(elements, { label = GetTranslation("rename_storage"), value = "rename", desc = GetTranslation("rename_storage_desc") })
+    end
+
+    -- Access management: owner only
+    if accessLevel == "owner" then
+        table.insert(elements, { label = GetTranslation("access_management_option"), value = "access", desc = GetTranslation("manage_access_desc") })
+    end
+
+    -- Upgrade: owner, manager
+    if accessLevel == "owner" or accessLevel == "manager" then
+        table.insert(elements, { label = GetTranslation("upgrade_storage", upgradePrice), value = "upgrade", desc = GetTranslation("upgrade_storage_desc", Config.StorageUpgradeSlots) })
+    end
+
+    table.insert(elements, { label = GetTranslation("close_menu"), value = "close", desc = "" })
+
+    -- Subtext shows balance + role for non-owners
+    local balanceStr = GetTranslation("storage_balance", string.format("%.2f", storageBalance))
+    local subtext = balanceStr
+    if accessLevel == "manager" then
+        subtext = GetTranslation("storage_menu_subtext_manager") .. " | " .. balanceStr
+    elseif accessLevel == "member" then
+        subtext = GetTranslation("storage_menu_subtext_member") .. " | " .. balanceStr
+    end
+
     MenuData.Open("default", GetCurrentResourceName(), "storage_owner_menu",
     {
         title = storageName,
-        subtext = GetTranslation("storage_balance", string.format("%.2f", storageBalance)),
+        subtext = subtext,
         align = "top-right",
         elements = elements
     }, function(data, menu)
@@ -242,7 +251,7 @@ function OpenAccessManagementMenu(storageId)
             OpenJobAccessManagementMenu(storageId)
         elseif action == "back" then
             menu.close()
-            OpenOwnerStorageMenu(storageId)
+            OpenOwnerStorageMenu(storageId, currentAccessLevel)
         elseif action == "close" then
             menu.close()
         end
@@ -251,139 +260,94 @@ function OpenAccessManagementMenu(storageId)
     end)
 end
 
--- New function to view and remove players with access
+-- View/manage players who have access to a storage
 function OpenRemovePlayersMenu(storageId)
     if not storageId then return end
-    DebugMsg("Opening remove players menu for storage ID: " .. storageId)
+    DebugMsg("Opening player access list for storage ID: " .. storageId)
     MenuData.CloseAll()
-    
-    -- Get storage details
-    local authorizedUsers = {}
+
+    -- Parse authorized_users from playerStorages (handles both old number[] and new {id,level}[] formats)
+    local rawUsers = {}
     local storageName = GetTranslation("storage_title", storageId)
-    
+
     for _, storage in pairs(playerStorages) do
         if storage.id == storageId then
-            authorizedUsers = json.decode(storage.authorized_users or '[]')
+            local decoded = json.decode(storage.authorized_users or '[]') or {}
+            for _, entry in ipairs(decoded) do
+                if type(entry) == "number" then
+                    table.insert(rawUsers, { id = tonumber(entry), level = "basic" })
+                elseif type(entry) == "table" and entry.id then
+                    table.insert(rawUsers, { id = tonumber(entry.id), level = entry.level or "basic" })
+                end
+            end
             storageName = storage.storage_name or storageName
             break
         end
     end
-    
-    DebugMsg("Found " .. #authorizedUsers .. " authorized users for storage")
-    
-    -- Handle the case with no authorized users right away
-    if #authorizedUsers == 0 then
-        DebugMsg("No authorized users found")
+
+    DebugMsg("Found " .. #rawUsers .. " authorized users for storage")
+
+    if #rawUsers == 0 then
         local elements = {
-            {
-                label = GetTranslation("no_players_found"),
-                value = "none",
-                desc = GetTranslation("manage_players_desc")
-            },
-            {
-                label = GetTranslation("back_menu"),
-                value = "back",
-                desc = GetTranslation("manage_players_desc")
-            }
+            { label = GetTranslation("no_players_found"), value = "none", desc = GetTranslation("manage_players_desc") },
+            { label = GetTranslation("back_menu"),        value = "back", desc = GetTranslation("manage_players_desc") }
         }
-        
         MenuData.Open("default", GetCurrentResourceName(), "remove_players_menu_empty",
-        {
-            title = storageName,
-            subtext = GetTranslation("authorized_players"),
-            align = "top-right",
-            elements = elements
-        }, function(data, menu)
-            if data.current.value == "back" then
-                menu.close()
-                OpenAccessManagementMenu(storageId)
-            end
+        { title = storageName, subtext = GetTranslation("authorized_players"), align = "top-right", elements = elements },
+        function(data, menu)
+            if data.current.value == "back" then menu.close() OpenAccessManagementMenu(storageId) end
         end, function(data, menu)
-            menu.close()
-            OpenAccessManagementMenu(storageId)
+            menu.close() OpenAccessManagementMenu(storageId)
         end)
         return
     end
-    
-    -- Prepare elements with loading placeholders
+
+    -- Build loading placeholders
     local elements = {}
-    for i, charId in pairs(authorizedUsers) do
-        table.insert(elements, {
-            label = GetTranslation("player_info_loading", i),
-            value = "loading_" .. charId,
-            desc = GetTranslation("player_info_wait")
-        })
+    for i, user in ipairs(rawUsers) do
+        table.insert(elements, { label = GetTranslation("player_info_loading", i), value = "loading_" .. user.id, desc = GetTranslation("player_info_wait") })
     end
-    
-    -- Add back button
-    table.insert(elements, {
-        label = GetTranslation("back_menu"),
-        value = "back",
-        desc = GetTranslation("manage_players_desc")
-    })
-    
-    -- Define the menu with initial loading elements
+    table.insert(elements, { label = GetTranslation("back_menu"), value = "back", desc = GetTranslation("manage_players_desc") })
+
     local menu = MenuData.Open("default", GetCurrentResourceName(), "remove_players_menu",
-    {
-        title = storageName,
-        subtext = GetTranslation("authorized_players"),
-        align = "top-right",
-        elements = elements
-    }, function(data, menu)
-        DebugMsg("Menu selection made: " .. data.current.value)
-        
+    { title = storageName, subtext = GetTranslation("authorized_players"), align = "top-right", elements = elements },
+    function(data, menu)
+        DebugMsg("Player access menu selection: " .. tostring(data.current.value))
         if data.current.value == "back" then
             menu.close()
             OpenAccessManagementMenu(storageId)
-        elseif string.sub(data.current.value, 1, 7) == "remove_" then
-            local charId = string.sub(data.current.value, 8)
-            DebugMsg("Selected to remove player with CharID: " .. charId)
-            
-            -- Direct removal approach
-            ShowRemoveConfirmation(storageId, charId, data.current.label)
+        elseif string.sub(data.current.value, 1, 7) == "player_" then
+            -- value format: "player_<charId>_<level>"
+            local rest = string.sub(data.current.value, 8)
+            local charIdStr, levelStr = rest:match("^(%d+)_(.+)$")
+            if charIdStr then
+                ShowPlayerOptions(storageId, tonumber(charIdStr), data.current.label, levelStr)
+            end
         end
     end, function(data, menu)
         menu.close()
         OpenAccessManagementMenu(storageId)
     end)
-    
-    -- Now fetch player names and update the elements
+
+    -- Async name lookup
     local updatedElements = {}
     local playersProcessed = 0
-    
-    for index, charId in pairs(authorizedUsers) do
-        DebugMsg("Fetching name for CharID: " .. charId)
-        
+
+    for _, user in ipairs(rawUsers) do
+        local charId = tonumber(user.id) or 0
+        local level  = user.level or "basic"
         GetCharacterName(charId, function(name)
             playersProcessed = playersProcessed + 1
             local displayName = name or GetTranslation("player_not_found")
-            
-            DebugMsg("Got name for CharID " .. charId .. ": " .. displayName)
-            
+            local levelLabel  = GetTranslation("access_level_" .. level)
             table.insert(updatedElements, {
-                label = displayName .. " (ID: " .. charId .. ")",
-                value = "remove_" .. charId,
-                desc = GetTranslation("add_remove_desc")
+                label = displayName .. " [" .. levelLabel .. "] (ID: " .. tostring(charId) .. ")",
+                value = "player_" .. tostring(charId) .. "_" .. level,
+                desc  = GetTranslation("add_remove_desc")
             })
-            
-            -- When all players are processed, update the menu
-            if playersProcessed == #authorizedUsers then
-                DebugMsg("All player names loaded, updating menu")
-                
-                -- Sort elements alphabetically
-                table.sort(updatedElements, function(a, b)
-                    return a.label < b.label
-                end)
-                
-                -- Add back button
-                table.insert(updatedElements, {
-                    label = GetTranslation("back_menu"),
-                    value = "back",
-                    desc = GetTranslation("manage_players_desc")
-                })
-                
-                -- Update menu elements
-                DebugMsg("Refreshing menu with " .. #updatedElements .. " elements")
+            if playersProcessed == #rawUsers then
+                table.sort(updatedElements, function(a, b) return a.label < b.label end)
+                table.insert(updatedElements, { label = GetTranslation("back_menu"), value = "back", desc = GetTranslation("manage_players_desc") })
                 menu.setElements(updatedElements)
                 menu.refresh()
             end
@@ -391,12 +355,107 @@ function OpenRemovePlayersMenu(storageId)
     end
 end
 
--- New function to directly show removal confirmation without relying on menu.submit
+-- Show per-player options: change level or remove access
+function ShowPlayerOptions(storageId, charId, playerLabel, currentLevel)
+    MenuData.CloseAll()
+    local playerName = string.match(playerLabel, "^(.+) %[") or playerLabel
+    local levelLabel = GetTranslation("access_level_" .. (currentLevel or "basic"))
+
+    local elements = {
+        { label = GetTranslation("change_level_option"), value = "changelevel", desc = "" },
+        { label = GetTranslation("remove_access_option"), value = "remove", desc = GetTranslation("remove_access_desc", playerName) },
+        { label = GetTranslation("back_menu"), value = "back" }
+    }
+
+    MenuData.Open("default", GetCurrentResourceName(), "player_options_menu",
+    { title = GetTranslation("player_options_title"), subtext = playerName .. " [" .. levelLabel .. "]", align = "top-right", elements = elements },
+    function(data, menu)
+        if data.current.value == "changelevel" then
+            menu.close()
+            OpenChangeLevelMenu(storageId, charId, playerName, currentLevel)
+        elseif data.current.value == "remove" then
+            menu.close()
+            ShowRemoveConfirmation(storageId, tostring(charId), playerLabel)
+        else
+            menu.close()
+            OpenRemovePlayersMenu(storageId)
+        end
+    end, function(data, menu)
+        menu.close()
+        OpenRemovePlayersMenu(storageId)
+    end)
+end
+
+-- Change an existing player's access level
+function OpenChangeLevelMenu(storageId, charId, playerName, currentLevel)
+    MenuData.CloseAll()
+    local levels = { "basic", "member", "manager" }
+    local elements = {}
+    for _, levelKey in ipairs(levels) do
+        local label = GetTranslation("access_level_" .. levelKey)
+        if levelKey == currentLevel then label = label .. " (current)" end
+        table.insert(elements, { label = label, value = levelKey, desc = GetTranslation("access_level_" .. levelKey .. "_desc") })
+    end
+    table.insert(elements, { label = GetTranslation("back_menu"), value = "back" })
+
+    MenuData.Open("default", GetCurrentResourceName(), "change_level_menu",
+    { title = GetTranslation("change_level_option"), subtext = playerName, align = "top-right", elements = elements },
+    function(data, menu)
+        local val = data.current.value
+        if val == "back" then
+            menu.close()
+            local lbl = GetTranslation("access_level_" .. (currentLevel or "basic"))
+            ShowPlayerOptions(storageId, charId, playerName .. " [" .. lbl .. "] (ID: " .. charId .. ")", currentLevel)
+        elseif val == "basic" or val == "member" or val == "manager" then
+            TriggerServerEvent('character_storage:changeUserLevel', storageId, charId, val)
+            menu.close()
+            Wait(500)
+            OpenRemovePlayersMenu(storageId)
+        end
+    end, function(data, menu)
+        menu.close()
+        OpenRemovePlayersMenu(storageId)
+    end)
+end
+
+-- Add-player level selection: shown after picking a player from the online list
+function OpenAccessLevelSelectionMenu(storageId, charId, playerName)
+    MenuData.CloseAll()
+    local levels = {
+        { key = "basic",   label = GetTranslation("access_level_basic"),   desc = GetTranslation("access_level_basic_desc")   },
+        { key = "member",  label = GetTranslation("access_level_member"),  desc = GetTranslation("access_level_member_desc")  },
+        { key = "manager", label = GetTranslation("access_level_manager"), desc = GetTranslation("access_level_manager_desc") },
+    }
+    local elements = {}
+    for _, lv in ipairs(levels) do
+        table.insert(elements, { label = lv.label, value = lv.key, desc = lv.desc })
+    end
+    table.insert(elements, { label = GetTranslation("back_menu"), value = "back" })
+
+    MenuData.Open("default", GetCurrentResourceName(), "select_access_level_menu",
+    { title = GetTranslation("add_player_select_level", playerName), subtext = GetTranslation("select_access_level"), align = "top-right", elements = elements },
+    function(data, menu)
+        local val = data.current.value
+        if val == "back" then
+            menu.close()
+            DisplayNearbyPlayersMenu()
+        elseif val == "basic" or val == "member" or val == "manager" then
+            TriggerServerEvent('character_storage:addUserById', storageId, charId, val)
+            VORPcore.NotifyRightTip(GetTranslation("player_added"), 3000)
+            menu.close()
+        end
+    end, function(data, menu)
+        menu.close()
+        DisplayNearbyPlayersMenu()
+    end)
+end
+
+-- Show confirmation dialog before removing a player's access
 function ShowRemoveConfirmation(storageId, charId, playerLabel)
     DebugMsg("Showing confirmation for storage " .. storageId .. ", charId " .. charId)
     
-    -- Extract player name from the label
-    local playerName = string.match(playerLabel, "^(.+) %(ID:")
+    -- Extract player name from the label (handles both "Name [Level] (ID:...)" and "Name (ID:...)")
+    local playerName = string.match(playerLabel, "^(.+) %[") or string.match(playerLabel, "^(.+) %(ID:")
     if not playerName then playerName = GetTranslation("player_not_found") end
     
     -- Ensure charId is numeric
@@ -433,11 +492,10 @@ function ShowRemoveConfirmation(storageId, charId, playerLabel)
             -- Show immediate feedback
             VORPcore.NotifyRightTip(GetTranslation("removal_success", playerName), 4000)
             
-            -- Close menu and open the management menu again
+            -- Close and reopen player list
             menu.close()
-            Wait(1000)
-            DebugMsg("Reopening access management menu")
-            OpenAccessManagementMenu(storageId)
+            Wait(500)
+            OpenRemovePlayersMenu(storageId)
         else
             DebugMsg("Removal cancelled")
             menu.close()
@@ -525,7 +583,7 @@ function OpenRenameMenu(storageId)
             TriggerServerEvent('character_storage:renameStorage', storageId, newName)
         else
             -- Return to owner menu if canceled or empty
-            OpenOwnerStorageMenu(storageId)
+            OpenOwnerStorageMenu(storageId, currentAccessLevel)
         end
     end)
 end
@@ -586,11 +644,11 @@ function ConfirmUpgradeStorage(storageId)
             menu.close()
         elseif data.current.value == "cancel" then
             menu.close()
-            OpenOwnerStorageMenu(storageId)
+            OpenOwnerStorageMenu(storageId, currentAccessLevel)
         end
     end, function(data, menu)
         menu.close()
-        OpenOwnerStorageMenu(storageId)
+        OpenOwnerStorageMenu(storageId, currentAccessLevel)
     end)
 end
 
@@ -843,8 +901,8 @@ end
 
 -- Register network events for opening menus
 RegisterNetEvent('character_storage:openOwnerMenu')
-AddEventHandler('character_storage:openOwnerMenu', function(storageId)
-    OpenOwnerStorageMenu(storageId)
+AddEventHandler('character_storage:openOwnerMenu', function(storageId, accessLevel)
+    OpenOwnerStorageMenu(storageId, accessLevel or "owner")
 end)
 
 -- Add event handlers for notifications
@@ -922,9 +980,9 @@ function DisplayNearbyPlayersMenu()
                 end
             end
             
-            -- Add player to storage access
-            TriggerServerEvent('character_storage:addUserById', currentStorageId, tonumber(charId))
+            -- Open access level picker before adding
             menu.close()
+            OpenAccessLevelSelectionMenu(currentStorageId, tonumber(charId), playerName)
         end
     end, function(data, menu)
         menu.close()
@@ -933,46 +991,6 @@ function DisplayNearbyPlayersMenu()
 end
 
 -- Update OpenAddPlayerMenu function to change "nearby" players to "all" players
-function OpenAddPlayerMenu(storageId)
-    if not storageId then return end -- Safety check
-    
-    currentStorageId = storageId -- Store for callbacks
-    
-    -- Using VORP menu pattern for an initial selection
-    local elements = {
-        {
-            label = GetTranslation("search_nearby"),
-            value = "nearby",
-            desc = GetTranslation("all_players_desc")
-        },
-        {
-            label = GetTranslation("back_menu"),
-            value = "back",
-            desc = GetTranslation("manage_players_desc")
-        }
-    }
-    
-    MenuData.Open("default", GetCurrentResourceName(), "add_player_menu",
-    {
-        title = GetTranslation("add_player_title", storageId),
-        subtext = GetTranslation("select_method"),
-        align = "top-right",
-        elements = elements
-    }, function(data, menu)
-        if data.current.value == "nearby" then
-            menu.close()
-            -- Request online players from server
-            TriggerServerEvent('character_storage:getOnlinePlayers')
-        elseif data.current.value == "back" then
-            menu.close()
-            OpenAccessManagementMenu(storageId)
-        end
-    end, function(data, menu)
-        menu.close()
-        OpenAccessManagementMenu(storageId)
-    end)
-end
-
 -- Add event handler for receiving online players
 RegisterNetEvent('character_storage:receiveOnlinePlayers')
 AddEventHandler('character_storage:receiveOnlinePlayers', function(playersList)
@@ -1026,7 +1044,7 @@ function OpenDepositMenu(storageId)
         else
             VORPcore.NotifyRightTip(GetTranslation("invalid_amount"), 3000)
         end
-        OpenOwnerStorageMenu(storageId)
+        OpenOwnerStorageMenu(storageId, currentAccessLevel)
     end)
 end
 
@@ -1059,7 +1077,7 @@ function OpenWithdrawMenu(storageId)
         else
             VORPcore.NotifyRightTip(GetTranslation("invalid_amount"), 3000)
         end
-        OpenOwnerStorageMenu(storageId)
+        OpenOwnerStorageMenu(storageId, currentAccessLevel)
     end)
 end
 
@@ -1143,11 +1161,11 @@ function OpenLedgerMenu(storageId)
     }, function(data, menu)
         if data.current.value == "back" then
             menu.close()
-            OpenOwnerStorageMenu(storageId)
+            OpenOwnerStorageMenu(storageId, currentAccessLevel)
         end
     end, function(data, menu)
         menu.close()
-        OpenOwnerStorageMenu(storageId)
+        OpenOwnerStorageMenu(storageId, currentAccessLevel)
     end)
 end
 

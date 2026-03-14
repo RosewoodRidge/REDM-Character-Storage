@@ -30,3 +30,32 @@ ALTER TABLE `character_storage`
   ADD COLUMN IF NOT EXISTS `is_preset` TINYINT(1) NOT NULL DEFAULT 0,
   ADD COLUMN IF NOT EXISTS `money_balance` DECIMAL(15,2) NOT NULL DEFAULT 0.00,
   ADD COLUMN IF NOT EXISTS `ledger_history` LONGTEXT NULL DEFAULT NULL;
+
+
+-- =========================================
+-- MIGRATION NOTE (1.0.6 → 1.1.0+)
+-- authorized_users format change
+-- =========================================
+-- No schema change required. The `authorized_users` column type (LONGTEXT)
+-- is unchanged. However, the JSON format stored inside it has changed:
+--
+--   Old format:  [123, 456]
+--   New format:  [{"id":123,"level":"basic"}, {"id":456,"level":"manager"}]
+--
+-- Access levels:
+--   "owner"   - full control (rename, delete, access mgmt, upgrade, deposit, withdraw, ledger)
+--   "manager" - open, deposit, withdraw, upgrade, ledger (no rename/delete/access mgmt)
+--   "member"  - open, deposit, ledger only
+--   "basic"   - open storage items only
+--
+-- Existing rows with the old integer-array format are automatically
+-- upgraded to the new format by ParseAuthorizedUsers() the first time
+-- each row is read. No manual migration is required.
+--
+-- To force-reset ALL authorized_users to empty (optional, will revoke all access):
+-- UPDATE `character_storage` SET `authorized_users` = '[]' WHERE `authorized_users` NOT LIKE '%{%';
+--
+-- Job grade access levels are configured in config.lua:
+--   Config.ManagerJobGrades = {2}   -- job grade 2 → "manager" access
+--   Config.MemberJobGrades  = {1}   -- job grade 1 → "member" access
+--   (any other grade)               → "basic" access
